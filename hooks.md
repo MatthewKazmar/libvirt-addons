@@ -68,4 +68,48 @@ br0               1 PVID Egress Untagged
                   65
 vnet26            46 PVID Egress Untagged
 ```
-    
+
+### Challenges in coding
+In the [Libvirt hook documentation](https://libvirt.org/hooks.html#etc-libvirt-hooks-network), it says about port-created:
+> Later, when network is started and there's an interface from a domain to be plugged into the network, the hook script is called as:
+> /etc/libvirt/hooks/network network_name port-created begin -
+   
+On my initial read, it seemed straightforward. The port is created, which means its added to the bridge. Right? No. The network and port XML shows up as expected but there is no evidence of the MAC address on the system until *after* the script exits. In my opinion, this isn't *port-created*, its *pre-port-creation*. No matter.
+
+The root of the problem is that there is no way to update a bridge port that doesn't exist. Secondary, Libvirt will simply block *until it considers the script finished* so we can't simply wait for the port to appear on the bridge. Or can we?
+
+How does Libvirt consider a hook script to be finished?
+1. The script process has to return 0.
+2. stdout/stderr need to end.
+   
+If we can achieve those two items in our script without actually quiting our script, then Libvirt will resume and create the bridge port and we can modify the port.
+
+#### return 0
+This part effectively detaches the script from the calling process, Libvirt. It feels a bit hacky but is quite effective.
+```
+try:
+  pid = os.fork()
+  if pid > 0:
+    # Parent script must die.
+    sys.exit(0)
+  os.setsid()
+except Exception as e:
+  logging.debug(e)
+  sys.exit(1)
+```
+os.fork() effectively duplicates the script. Two copies running. The parent (original script, called by Libvirt) has PID > 0 *and is attached to Libvirt*. The child has 0 and is set to be independent with the os.setsid() call. So kill the parent script, libvirt gets a return 0. Now we have a detached child that can wait for Libvirt to create the bridge port.
+
+#### close out stdout/stderr
+With the fork/setsid, it doesn't feel like this is necessary anymore but I haven't tested yet.
+
+This is straight forward. Close the streams and file descriptors.
+```
+try:
+  sys.stdout.close()
+  sys.stderr.close()
+  os.close(1)
+  os.close(2)
+except Exception as e:
+  logging.debug(e)
+  sys.exit(1)
+```
