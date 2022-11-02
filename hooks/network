@@ -1,0 +1,254 @@
+#!/usr/bin/python3
+# network hook script for Libvirt
+# Class for accepting the network and network interface XML hooks
+
+# AppArmor note: pyroute2 fails in a hook unless "network netlink dgram,"
+# is added to the right section in /etc/apparmor.d/local/usr.sbin.libvirtd
+# Restart apparmor when done.
+# Credit: https://github.com/nesanton/kvmvlan/issues/2
+
+import sys, json, xmltodict, logging, os, time
+from pyroute2 import IPRoute
+
+#########################################################################
+# constants : Stuff that can be changed but probably won't need to be.
+DEFAULT_PORTGROUPS = [ 'native', 'default']
+DEFAULT_PG_VID = 1
+TRUNK_PORTGROUPS = [ 'trunk', 'all' ]
+LIBVIRT_HOOKS = '/etc/libvirt/hooks'
+PORT_CREATED_HELPER = 'libvirtPortCreated.py'
+
+class libvirtBridgeHook:
+  #########################################################################
+  # lookupIntIndex : finds the interface index, based on the MAC address
+  # Libvirt hasn't added the VM to the bridge when the hook is called.
+  # Done sometime after, so checking every 5 seconds for 2 min.
+
+  def lookupIntIndex(self):
+    ipr = IPRoute()
+    
+    fdbQuery = None
+    c = 0
+    
+    while fdbQuery == None and c < 24:
+      time.sleep(5)
+      try:
+        fdbQuery = ipr.fdb('dump', lladdr=self.portMac)[0]['ifindex']
+      except:
+        c = c + 1
+        logging.debug("IfIndex lookup, attempt {}.".format(c))
+        pass
+    
+    if fdbQuery != None:
+      return fdbQuery
+    else:
+      return -1
+
+  #########################################################################
+  # plumbPortNativeVlan : changes the access port on the port
+  def plumbPortNativeVlan(self, logging):
+    ipr = IPRoute()
+
+    # vlan_info object
+    vid = int(list(self.portVid.values())[0])
+    vlan_info = {
+      'vid' : vid,
+      'flags' : [ "pvid", "untagged" ] 
+    }
+
+    logging.debug("Vlan_info: {}".format(json.dumps(vlan_info)))
+
+    # Add the correct vlan filter entry
+    try:
+      ipr.vlan_filter('add', index=self.portIndex, vlan_info=vlan_info)
+    except Exception as e:
+      logging.debug(e)
+      return -1
+
+    logging.debug("Added VID {} as PVID/Untagged to bridge.".format(vid))
+    
+    # Remove the previous default filter entry.
+    try:
+      ipr.vlan_filter('del', index=self.portIndex, vlan_info={'vid' : DEFAULT_PG_VID })
+    except Exception as e:
+      logging.debug(e)
+      return -1
+
+    logging.debug("Removed original native vlan {} from port.".format(DEFAULT_PG_VID))
+
+    return 0
+
+  #########################################################################
+  # plumbPortNativeVlan : changes the access port on the port
+  def plumbPortTaggedVlan(self, logging):
+    ipr = IPRoute()
+
+    logging.debug("Retained original native vlan {} from port.".format(DEFAULT_PG_VID))
+
+    for vid in self.portVid.values():
+      if vid != DEFAULT_PG_VID:
+        vlan_info = { 'vid' : int(vid) }
+        logging.debug("Vlan_info: {}".format(json.dumps(vlan_info)))
+        try:
+          ipr.vlan_filter('add', index=self.portIndex, vlan_info=vlan_info)
+        except Exception as e:
+          logging.debug(e)
+          return -1
+        logging.debug("Added VID {} as Tagged to Bridge.".format(vid))
+
+    return 0
+
+  #########################################################################
+  # applyVid : Apply vid to port
+  def applyVid(self, logging):
+    # Apply vid to network.
+    # Libvirt just adds the vnetX interface in the default VLAN.
+    if len(self.portVid.keys()) == 1:
+      # Just the default here so do nothing.
+      if 'default' in self.portVid.keys():
+        logging.debug("No change specified. Retained original native vlan {} from port.".format(DEFAULT_PG_VID))
+        return 0
+      else:
+        return self.plumbPortNativeVlan(logging)
+    else:
+      return self.plumbPortTaggedVlan(logging)
+  
+  #########################################################################
+  # portCreatedJson : get portgroup from vNIC
+  # returns json suitable for port-created helper script
+  def portCreatedJson(self):
+    pcDict = {
+      'mac' : self.portMac,
+      'vid' : self.portVid
+    }
+
+    return json.dumps(pcDict)
+
+  #########################################################################
+  # lookupVid : get portgroup from vNIC
+  # returns default if none
+  def lookupVid(self, p, logging):
+    # Does the network xml have portgroups defined?
+    if 'group' not in p.keys():
+      # Return empty list if network has no PGs.
+      return { 'default' : DEFAULT_PG_VID }
+    else:
+      portpg = p['group']
+
+    logging.debug("Port's portgroup: {}".format(portpg))
+
+    if portpg in DEFAULT_PORTGROUPS:
+      return { 'default' : DEFAULT_PG_VID }
+    elif portpg in TRUNK_PORTGROUPS:
+      # Return all VIDs
+      return self.netVids
+    else:
+      return { portpg : self.netVids[portpg] }
+
+  #########################################################################
+  # getNetVids : get the desired access port for the VLAN or 4095 if trunk.
+  # returns NATIVE_VLAN if nothing found
+  def getNetVids(self, p, logging):
+    if 'portgroup' not in p.keys():
+      # Return .
+      return { 'default' : DEFAULT_PG_VID }
+    else:
+      pgs = p['portgroup']
+
+    # Ensures 1 entry minimum is returned, even for trunk
+    # So we don't fail out if there are no PortGroups found.
+    pgDict = { 'default' : DEFAULT_PG_VID }
+    for pg in pgs:
+      pgDetail = pg['@name'].split('-')
+      # Only return non-native
+      if pgDetail[1] != DEFAULT_PG_VID:
+        pgDict[pgDetail[0]] = pgDetail[1]
+
+    logging.debug('Vids defined on Network: {}'.format(json.dumps(pgDict)))
+    #return map from Network XML
+    return pgDict
+
+  #########################################################################
+  # __init__ : Takes the XML and builds out an our object.
+  def __init__(self, xml, logging):
+
+    origXml = xmltodict.parse(xml)
+
+    if all(x in ['networkport', 'network'] for x in origXml['hookData'].keys()):
+      self.requestType = "networkPort"
+      #Libvirt doesn't send the port name
+      self.portMac = origXml['hookData']['networkport']['mac']['@address']
+      logging.debug("MAC: {}".format(self.portMac))
+      self.portIndex = self.lookupIntIndex()
+      logging.debug("IfIndex: {}".format(self.portIndex))
+      if self.portIndex == -1:
+        logging.debug("No index for the given MAC. Did Libvirt add the port to the bridge yet?")
+        raise Exception ("No index for the given MAC. Did Libvirt add the port to the bridge yet?")
+    elif 'network' in origXml['hookData'].keys():
+      self.requestType = "network"
+    else:
+      self.requestType = "none"
+      return
+
+    # Parse network XML
+    self.bridgeName = origXml['hookData']['network']['bridge']['@name']
+    
+    # Really want network type open or bridge here. The others just don't make sense.
+    self.networkType = origXml['hookData']['network']['forward']['@mode']
+
+    logging.debug("Bridge Name: {}\nNetwork Type: {}\n".format(self.bridgeName, self.networkType))
+
+    # Vlans are defined with empty port groups using <name>-<tag>.
+    # Get the network list then the vid we want as native or trunk.
+    self.netVids = self.getNetVids(origXml['hookData']['network'], logging)
+    self.portVid = self.lookupVid(origXml['hookData']['networkport'], logging)
+
+#########################################################################
+# main
+#########################################################################
+
+# Start logging
+logging.basicConfig(filename='/var/log/libvirt/qemu/libvirtbridgehook.log', encoding='utf-8', level=logging.DEBUG)
+
+# Arguments
+try:
+  networkName = sys.argv[1]
+  action = sys.argv[2]
+except Exception as e:
+  logging.debug("Insuffient arguments to script.")
+  logging.debug(e)
+  sys.exit(1)
+
+logging.debug('Action: {}'.format(action))
+
+# Close StdOut/StdErr to release Libvirst
+try:
+  sys.stdout.close()
+  sys.stderr.close()
+  os.close(1)
+  os.close(2)
+except Exception as e:
+  logging.debug(e)
+  sys.exit(1)
+
+# Detach this script so Libvirt will create the port.
+try:
+  pid = os.fork()
+  if pid > 0:
+    # Parent script must die.
+    sys.exit(0)
+  os.setsid()
+except Exception as e:
+  logging.debug(e)
+  sys.exit(1)
+
+# Create object using XML
+hook = libvirtBridgeHook(sys.stdin.read(), logging)
+
+if action == 'port-created':
+  result = hook.applyVid(logging)
+  if result == -1:
+    logging.debug("Error assigning VLAN.")
+    sys.exit(1)
+
+sys.exit(0)
