@@ -1,0 +1,118 @@
+## Variables
+<%
+  import socket, string
+
+  hosts = {
+    "plastic" : {
+      "lo"                 : "192.168.255.5",
+      "native1"            : "192.168.2.27/25",
+      "underlay0_ip"       : "192.168.255.68/27",
+      "underlay0_nic"      : "eno1",
+      "underlay1_ip"       : "192.168.255.101/27",
+      "underlay1_nic"      : "bond1"
+    },
+    "captures" : {
+      "lo"                 : "192.168.255.2",
+      "native1"            : "192.168.2.23/25",
+      "underlay0_ip"       : "192.168.255.66/27",
+      "underlay0_nic"      : "eno1",
+      "underlay1_ip"       : "192.168.255.102/27",
+      "underlay1_nic"      : "bond1"
+    },
+    "filling" : {
+      "lo"                 : "192.168.255.3",
+      "native1"            : "192.168.2.21/25",
+      "underlay0_ip"       : "192.168.255.69/27",
+      "underlay0_nic"      : "eno1",
+      "underlay1_ip"       : "192.168.255.100/27",
+      "underlay1_nic"      : "bond1"
+    }
+  }
+
+  net1_vids = "1 13 64"
+  net2_vids = "11 65"
+
+  my = hosts.pop(socket.gethostname(), None)
+  vxlan_vnis = [3, 4, 45, 46]
+  vxlan_remote_ip_map = ""
+  bridge_vlan_vni_map = ""
+  vxlan_vids = ""
+
+  for vni in vxlan_vnis:
+    bridge_vlan_vni_map = "{0} {1}={1}".format(bridge_vlan_vni_map, vni)
+    if vxlan_vids == "":
+      vxlan_vids = vni
+    else:
+      vxlan_vids = "{0} {1}".format(vxlan_vids, vni)
+    for key in hosts:
+      vxlan_remote_ip_map = "{0} {1}={2}".format(vxlan_remote_ip_map, vni, hosts[key]['lo'])
+
+  vxlan_remote_ip_map = vxlan_remote_ip_map.strip()
+  bridge_vlan_vni_map = bridge_vlan_vni_map.strip()
+%>
+
+## Loopback
+auto lo
+iface lo inet loopback
+  address ${my['lo']}/32
+  vxlan-local-tunnelip ${my['lo']}
+
+## Client interface, and bridge
+auto eno1
+iface eno1
+  mtu 9000
+  bridge_vids ${net1_vids}
+
+## Bond interfaces
+auto ens1
+iface ens1
+  mtu 9000
+
+auto ens1d1
+iface ensd1
+  mtu 9000
+
+auto bond1
+iface bond1
+  bond-slaves ens1 ens1d1
+  bond-mode 802.3ad
+  bond-min-links 1
+  mtu 9000
+  bridge-vids ${net2_vids}
+  bridge-allow-untagged no
+
+## Create vlan-aware vxlan
+auto vxlan0
+iface vxlan0
+  vxlan-remoteip-map ${vxlan_remote_ip_map}
+  vxlan-ttl 10
+  bridge-vids ${vxlan_vids}
+  bridge-vlan-vni-map ${bridge_vlan_vni_map}
+  bridge-allow-untagged no
+
+## Create vlan-aware bridge with vxlan
+auto br0
+iface br0
+  bridge-ports vxlan0 ${my['underlay0_nic']} ${my['underlay1_nic']}
+  bridge-vlan-aware yes
+  mtu 9000
+  address ${my['native1']}
+  gateway 192.168.2.2
+
+## Create underlay0_ip vlan
+auto underlay0
+iface underlay0
+  vlan-raw-device br0
+  vlan-id 64
+  vlan-bridge-binding on
+  mtu 9000
+  address ${my['underlay0_ip']}
+
+## Create underlay1_ip vlan
+auto underlay1
+iface underlay1
+  vlan-raw-device br0
+  vlan-id 65
+  vlan-bridge-binding on
+  mtu 9000
+  address ${my['underlay1_ip']}
