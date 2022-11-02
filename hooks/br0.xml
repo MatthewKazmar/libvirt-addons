@@ -1,0 +1,9 @@
+<network>
+  <name>br0</name>
+  <forward mode='bridge'/>
+  <bridge name='br0'/>
+  <portgroup name = 'server-3'/>
+  <portgroup name = 'dmz-4'/>
+  <portgroup name = 'kubernetes-45'/>
+  <portgroup name = 'zerotier-46'/>
+</network>
