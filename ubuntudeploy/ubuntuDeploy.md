@@ -13,6 +13,7 @@ Google Cloud SDK and crc32
 
 Libvirt and Rados Python modules
 * apt install python3-libvirt python3-rbd
+
 User password hash and root public key in Google Secret Manager.
 
 ## Tasks done
