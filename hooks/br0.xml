@@ -2,8 +2,13 @@
   <name>br0</name>
   <forward mode='bridge'/>
   <bridge name='br0'/>
-  <portgroup name = 'server-3'/>
-  <portgroup name = 'dmz-4'/>
-  <portgroup name = 'kubernetes-45'/>
-  <portgroup name = 'zerotier-46'/>
+  <portgroup name='server-3'/>
+  <portgroup name='dmz-4'/>
+  <portgroup name='frontier-11'/>
+  <portgroup name='tmobile-13'/>
+  <portgroup name='kubernetes-45'/>
+  <portgroup name='zerotier-46'/>
+  <portgroup name='underlay0-64'/>
+  <portgroup name='underlay1-65'/>
+  <portgroup name='panha-100'
 </network>
