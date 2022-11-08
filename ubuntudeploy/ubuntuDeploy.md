@@ -6,9 +6,11 @@ I got tired of having to click through the Ubuntu installer so I automated it.
 Google Cloud CLI
 * Run gcloud init
 * Run gcloud auth application-default login
+
 Google Cloud SDK and crc32
 * pip install google-cloud-secret-manager
 * pip install google-crc32c
+
 Libvirt and Rados Python modules
 * apt install python3-libvirt python3-rbd
 User password hash and root public key in Google Secret Manager.
