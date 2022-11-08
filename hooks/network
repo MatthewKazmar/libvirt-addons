@@ -21,29 +21,46 @@ PORT_CREATED_HELPER = 'libvirtPortCreated.py'
 class libvirtBridgeHook:
   #########################################################################
   # lookupIntIndex : finds the interface index, based on the MAC address
-  # Libvirt hasn't added the VM to the bridge when the hook is called.
-  # Done sometime after, so checking every 5 seconds for 2 min.
-
   def lookupIntIndex(self):
-    ipr = IPRoute()
+
+    logging.debug("In lookupIntIndex.")
+
+    try:
+      ipr = IPRoute()
+    except Exception as e:
+      logging.debug("Issue creating IPRoute object.\n {}".format(e))
+      sys.exit(1)
     
-    fdbQuery = None
+    # The TAP interface itself doesn't share the MAC with the host. The VM's
+    # MAC address is used, with the first byte swapped to FE or FA.
+    # https://github.com/libvirt/libvirt/blob/master/src/util/virnetdevtap.c
+    # Line 611-624
+    splitMac = self.portMac.split(':')
+    if splitMac[0] == 'fe':
+      splitMac[0] = 'fa'
+    else:
+      splitMac[0] = 'fe'
+
+    tapMac = ':'.join(splitMac)
+
+    logging.debug("Tap MAC: {}".format(tapMac))
+
+    tapIndex=-1
     c = 0
-    
-    while fdbQuery == None and c < 24:
+    while tapIndex == -1 and c < 24:
       time.sleep(5)
       try:
-        fdbQuery = ipr.fdb('dump', lladdr=self.portMac)[0]['ifindex']
+        tapIndex = ipr.link_lookup(address=tapMac)[0]
       except:
         c = c + 1
         logging.debug("IfIndex lookup, attempt {}.".format(c))
         pass
     
-    if fdbQuery != None:
-      return fdbQuery
+    if tapIndex > -1:
+      return tapIndex
     else:
       return -1
-
+    
   #########################################################################
   # plumbPortNativeVlan : changes the access port on the port
   def plumbPortNativeVlan(self, logging):
@@ -174,11 +191,22 @@ class libvirtBridgeHook:
 
     origXml = xmltodict.parse(xml)
 
+    # Vlans are defined with empty port groups using <name>-<tag>.
+    # Get the network list then the vid we want as native or trunk.
+    self.netVids = self.getNetVids(origXml['hookData']['network'], logging)
+    
+    # Bridge name
+    self.bridgeName = origXml['hookData']['network']['bridge']['@name']
+    
+    # Really want network type open or bridge here. The others just don't make sense.
+    self.networkType = origXml['hookData']['network']['forward']['@mode']
+
     if all(x in ['networkport', 'network'] for x in origXml['hookData'].keys()):
       self.requestType = "networkPort"
       #Libvirt doesn't send the port name
       self.portMac = origXml['hookData']['networkport']['mac']['@address']
-      logging.debug("MAC: {}".format(self.portMac))
+      logging.debug("VM MAC: {}".format(self.portMac))
+      self.portVid = self.lookupVid(origXml['hookData']['networkport'], logging)
       self.portIndex = self.lookupIntIndex()
       logging.debug("IfIndex: {}".format(self.portIndex))
       if self.portIndex == -1:
@@ -198,10 +226,7 @@ class libvirtBridgeHook:
 
     logging.debug("Bridge Name: {}\nNetwork Type: {}\n".format(self.bridgeName, self.networkType))
 
-    # Vlans are defined with empty port groups using <name>-<tag>.
-    # Get the network list then the vid we want as native or trunk.
-    self.netVids = self.getNetVids(origXml['hookData']['network'], logging)
-    self.portVid = self.lookupVid(origXml['hookData']['networkport'], logging)
+
 
 #########################################################################
 # main
@@ -221,7 +246,7 @@ except Exception as e:
 
 logging.debug('Action: {}'.format(action))
 
-# Close StdOut/StdErr to release Libvirst
+# Close StdOut/StdErr to release Libvirt
 try:
   sys.stdout.close()
   sys.stderr.close()
