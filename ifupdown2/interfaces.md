@@ -3,6 +3,9 @@
 ## ifupdown2
 [ifupdown2](https://github.com/CumulusNetworks/ifupdown2) is available in the apt repo on Debian and perhaps others. Ubuntu has to build with the Makefile.
 
+## Blocker
+Running ifup -a after making a modification to the config, such as VLAN tagging, removes the KVM interfaces from the bridge. Restarting the VM fixes the issue. Restarting Libvirt may also fix the issue.
+
 ## Custom eventually?
 I like the idea of being able to configure both Libvirt VM vids and the network itself from the same source of truth. Ideally, I could leave the default Ubuntu netplan config with a single admin IP then build the other config around it, perhaps as a network started Libvirt hook.
 
